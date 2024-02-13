@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "datamachine"
-version = "0.1.2"
+version = "0.1.5"
 dependencies = []
 authors = [
   { name="Dave Killough", email="dave@benevolentmachines.org" },

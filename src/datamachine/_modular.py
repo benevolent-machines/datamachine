@@ -4,16 +4,14 @@
 
 import glob
 import importlib
-from urllib.request import urlopen
-from datetime import datetime
 import json
 import os
 import shutil
 import sys
+from datetime import datetime
+from urllib.request import urlopen
+
 import psutil
-import nbformat
-from nbconvert import HTMLExporter
-from nbconvert.preprocessors import ExecutePreprocessor
 
 DEFAULT = {
     "number": 1000,
@@ -34,20 +32,23 @@ CURRENT = {
     "trace": True,
 }
 
-
 def _cache_notebook(notebook):
 
     if not os.path.exists(CURRENT["folder"]):
         os.makedirs(CURRENT["folder"])
 
-    if CURRENT["invoker"] is None and CURRENT["number"] == DEFAULT["number"]:
-        # clear temp files in outer process before first request
-        pids = _get_python_pids()
-        pattern = f"{CURRENT['folder']}{os.path.sep}d_*"
-        for temp_file in glob.glob(pattern):
-            pid = temp_file.split("_")[1]
-            if pid not in pids:
-                os.remove(temp_file)
+    #print(f"current folder:  {CURRENT['folder']}")
+    #print(f"default folder:  {DEFAULT['folder']}")
+
+    if CURRENT["folder"] == DEFAULT["folder"]:
+        if CURRENT["invoker"] is None and CURRENT["number"] == DEFAULT["number"]:
+            # clear temp files in outer process before first request
+            pids = _get_python_pids()
+            pattern = f"{CURRENT['folder']}{os.path.sep}d_*"
+            for temp_file in glob.glob(pattern):
+                pid = temp_file.split("_")[1]
+                if pid not in pids:
+                    os.remove(temp_file)
 
     if "temp" not in notebook:  # new entry
         number = CURRENT["number"] = CURRENT["number"] + 1
@@ -125,40 +126,6 @@ def _get_python_pids():
     return processes
 
 
-def _execute_enter(invoker):
-    _trace("_execute_enter(" + str(invoker) + ")")
-    CURRENT["invoker"] = invoker
-    path = CURRENT["folder"] + os.path.sep + "d_" + str(invoker) + "_execute.json"
-    with open(path, encoding="utf-8") as file_in:
-        req = json.loads(file_in.read())
-        CURRENT["params"] = req["params"]
-    _trace(str(CURRENT["params"]))
-
-
-def _execute_stylings(html_data):
-    html_data = html_data.replace(
-        "</head>",
-        """
-        <style>
-            .container { width: 100% } 
-            .prompt { min-width: 0 } 
-            div.output_subarea { max-width: 100% }
-            body { margin: 0; padding: 0; }
-            div#notebook { padding-top: 0; }
-        </style>
-        </head>
-    """,
-    )
-    html_data = html_data.replace(
-        """
-<div class="cell border-box-sizing code_cell rendered">
-
-</div>""",
-        "",
-    )
-    return html_data
-
-
 def _extract_code(notebook_object):
     code = """
 ##############################################################################
@@ -209,76 +176,33 @@ def _trace_on():
     CURRENT["trace"] = True
 
 
-def execute_notebook(
-    notebook=None, library=None, html=None, params=None, force_reload=False,
-):
-    """Execute a notebook"""
-
-    if not os.path.exists(CURRENT["folder"]):
+def _set_home(home):
+    """
+    Override the home for datamachine_temp folder. 
+    The default home is the current directory.
+    """
+    if len(CURRENT["notebooks"]) > 0:
+        print("A set_home() after any import_notebook() will be ignored")
+    else:
+        if not os.path.isabs(home):
+            raise ValueError("Home must be an absolute path.")
+        CURRENT["folder"] = os.path.join(home, DEFAULT["folder"])
+        if os.path.exists(CURRENT["folder"]):
+            shutil.rmtree(CURRENT["folder"])
         os.makedirs(CURRENT["folder"])
 
-    _trace("execute_notebook('" + str(notebook) + "')")
-    nbo = _get_notebook(notebook, library, force_reload=force_reload)
+def broadcast_modules(spark):
+    """\
+Import a Python notebook as a module.
+    """
+    pyfiles = glob.glob(f'{CURRENT["folder"]}/*.py')
+    for pyfile in pyfiles:
+        spark.sparkContext.addPyFile(pyfile)
 
-    request = {  # pass to the executed notebook
-        "notebook": notebook,
-        "library": library,
-        "index": CURRENT["index"],
-        "html": html,
-        "params": params,
-    }
-
-    path = f"{CURRENT['folder']}{os.path.sep}d_{CURRENT['process']}_execute.json"
-    with open(path, "w", encoding="utf-8") as file_out:
-        json.dump(request, file_out, indent=4)
-
-    with open(nbo["temp"], encoding="utf-8") as temp_in:
-        src = temp_in.read()
-        src = src.replace("'colab'", "'notebook'")
-        src = src.replace("%pip install datamachine", "")
-        notebook_object = nbformat.reads(src, as_version=4)
-        code = os.linesep.join(
-            [
-                "import datamachine as dm",
-                "#import src.datamachine as dm",
-                "dm._execute_enter('" + CURRENT["process"] + "')",
-            ]
-        )
-
-        first_cell = nbformat.v4.new_code_cell(code)
-        notebook_object.cells.insert(0, first_cell)
-        execute_preprocessor = ExecutePreprocessor(timeout=600, kernel_name="python3")
-        execute_preprocessor.preprocess(notebook_object)
-
-        if html is not None:
-            html_exporter = HTMLExporter()
-            html_exporter.exclude_input = True
-            html_data, _ = html_exporter.from_notebook_node(notebook_object)
-            html_data = _execute_stylings(html_data)
-            with open(html, "w", encoding="utf-8") as file_out:
-                file_out.write(html_data)
-
-
-def execute_params(params):
-    """Set parameters"""
-
-    if CURRENT["invoker"] is None:  # inside execute
-        return params
-
-    path = f"{CURRENT['folder']}{os.path.sep}d_{CURRENT['invoker']}_execute.json"
-    if not os.path.exists(path):
-        return params
-
-    with open(path, encoding="utf-8") as file_in:
-        request = file_in.read()
-        req = json.loads(request)
-        return req["params"]
-
-
-def import_notebook(
-    notebook=None, library=None, force_reload=False,
-):
-    """xxx"""
+def import_notebook(notebook=None, library=None, force_reload=False):
+    """\
+Import a Python notebook as a module.
+    """
     nbo = _get_notebook(notebook, library, force_reload=force_reload)
 
     nbo["code"] = nbo["temp"].replace("ipynb", "py")
@@ -286,14 +210,24 @@ def import_notebook(
         nbj = json.load(file_in)
         with open(nbo["code"], "w", encoding="utf-8") as code_file:
             code_file.write(_extract_code(nbj))
-    nbo["module"] = nbo["code"].replace(".py", "").replace(os.path.sep, ".")
 
-    if os.getcwd() not in sys.path:
-        sys.path.append(os.getcwd())
+    # Extract module name and directory from the code file path
+    module_name = os.path.basename(nbo["code"]).replace(".py", "")
+    module_dir = os.path.dirname(nbo["code"])
+
+    # Insert the module directory at the beginning of sys.path
+    original_sys_path = list(sys.path)  # Keep a copy of the original sys.path
+    if module_dir not in sys.path:
+        sys.path.insert(0, module_dir)
+
+    # Import the module
     importlib.invalidate_caches()
-    module = importlib.import_module(nbo["module"])
+    module = importlib.import_module(module_name)
     if force_reload:
         importlib.reload(module)
+
+    # Restore the original sys.path
+    sys.path = original_sys_path
 
     return module
 
@@ -315,7 +249,7 @@ def set_library(library=None):
         CURRENT["library"] = library
 
 
-def show():
+def _show():
     """xxx"""
     # https://colab.research.google.com/drive/1L3l50wwh6M9cK02cFn0dJ0DUVLHEGCcc
     _ = """
